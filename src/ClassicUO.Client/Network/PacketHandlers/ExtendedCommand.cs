@@ -591,6 +591,10 @@ internal static class ExtendedCommand
                 OnRegisterSpellbookSerial(world, ref p);
                 break;
 
+            case 0x3F:
+                OnDynamicSpellbookQuery(ref p);
+                break;
+
             default:
                 Log.Warn($"Unhandled 0xBF - sub: {cmd.ToHex()}");
 
@@ -649,6 +653,21 @@ internal static class ExtendedCommand
             }
             first = next;
         }
+    }
+
+    /// <summary>
+    /// The server asks whether we can show server-defined spellbooks; answer with the highest
+    /// protocol version both sides understand. Servers that never ask keep using their own gumps.
+    /// </summary>
+    private static void OnDynamicSpellbookQuery(ref StackDataReader p)
+    {
+        byte serverVersion = p.ReadUInt8();
+        byte version = Math.Min(serverVersion, SpellbookCacheManager.PROTOCOL_VERSION);
+
+        if (version == 0)
+            return;
+
+        AsyncNetClient.Socket.Send_DynamicSpellbookHello(version);
     }
 
     private static void OnRegisterSpellbookSerial(World world, ref StackDataReader p)

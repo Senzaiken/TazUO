@@ -20,6 +20,7 @@ namespace ClassicUO.Game.Managers
         private readonly Dictionary<SpellBookType, int> _spellBookBaseId = new();
         private readonly SemaphoreSlim _saveLock = new(1, 1);
         private string _cacheFilePath;
+        public const byte PROTOCOL_VERSION = 1;
         private const uint DEFAULT_TTL = 14400;
 
         private SpellbookCacheManager() { }

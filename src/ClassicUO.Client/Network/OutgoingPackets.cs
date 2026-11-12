@@ -4727,6 +4727,25 @@ namespace ClassicUO.Network
             writer.WriteUInt16BE((ushort)resourceType); // Resource type
         }
 
+        /// <summary>
+        /// Answers the server's dynamic spellbook query (0xBF/0x3F) so it shows server-defined
+        /// books natively instead of falling back to its own gumps.
+        /// </summary>
+        public static void Send_DynamicSpellbookHello(this AsyncNetClient socket, byte protocolVersion)
+        {
+            const byte ID = 0xBF;
+            const int length = 6;
+
+            var writer = new StackDataWriter(length);
+            writer.WriteUInt8(ID);
+            writer.WriteUInt16BE(length);
+            writer.WriteUInt16BE(0x3F); // Subcommand: DynamicSpellbookHello
+            writer.WriteUInt8(protocolVersion);
+
+            socket.Send(writer.BufferWritten);
+            writer.Dispose();
+        }
+
         public static void Send_SpellbookBookmarkPress(
             this AsyncNetClient socket,
             uint spellbookSerial,
