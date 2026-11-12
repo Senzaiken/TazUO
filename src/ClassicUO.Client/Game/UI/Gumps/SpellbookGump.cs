@@ -7,10 +7,12 @@ using ClassicUO.Game.GameObjects;
 using ClassicUO.Game.Managers;
 using ClassicUO.Game.UI.Controls;
 using ClassicUO.Input;
+using ClassicUO.Network;
 using ClassicUO.Renderer;
 using Microsoft.Xna.Framework;
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Xml;
 using ClassicUO.Common.Enums;
 
@@ -28,6 +30,15 @@ namespace ClassicUO.Game.UI.Gumps
         private SpellBookType _spellBookType;
         private readonly bool[] _spells = new bool[64];
         private int _enqueuePage = -1;
+
+        private bool _isDynamicSpellbook;
+        private bool _isWaitingForSpellbookData;
+        private Label _loadingLabel;
+        private int _contentOffsetX;
+        private int _contentOffsetY;
+        private ushort _textColor = 0x0288;
+        private ushort _spellNameColor = 0x0288;
+        private ushort _titleColor;
 
         public SpellBookType SpellBookType => _spellBookType;
 
@@ -107,6 +118,8 @@ namespace ClassicUO.Game.UI.Gumps
 
             AssignGraphic(item);
 
+            _isDynamicSpellbook = DynamicSpellbookRegistry.IsDynamic(_spellBookType);
+
             GetBookInfo(
                 _spellBookType,
                 out ushort bookGraphic,
@@ -117,10 +130,57 @@ namespace ClassicUO.Game.UI.Gumps
                 out int dictionaryPagesCount
             );
 
-            Add(_picBase = new GumpPic(0, 0, bookGraphic, 0));
+            if (bookGraphic == 0 || minimizedGraphic == 0)
+            {
+                Dispose();
+                return;
+            }
+
+            ushort bookHue = 0;
+            ushort pageTurnLeftGfx = 0x08BB;
+            ushort pageTurnRightGfx = 0x08BC;
+            int pageTurnLeftPosX = 50;
+            int pageTurnLeftPosY = 8;
+            int pageTurnRightPosX = 321;
+            int pageTurnRightPosY = 8;
+            ushort[] overlayGraphics = null;
+
+            SpellbookCacheEntry cache = _isDynamicSpellbook
+                ? SpellbookCacheManager.Instance.GetCachedSpellbook((byte)_spellBookType)
+                : null;
+
+            if (cache != null)
+            {
+                if (cache.BookHue != 0) bookHue = cache.BookHue;
+                if (cache.PageTurnLeftGraphic != 0) pageTurnLeftGfx = cache.PageTurnLeftGraphic;
+                if (cache.PageTurnRightGraphic != 0) pageTurnRightGfx = cache.PageTurnRightGraphic;
+                if (cache.PageTurnLeftX != 0) pageTurnLeftPosX = cache.PageTurnLeftX;
+                if (cache.PageTurnLeftY != 0) pageTurnLeftPosY = cache.PageTurnLeftY;
+                if (cache.PageTurnRightX != 0) pageTurnRightPosX = cache.PageTurnRightX;
+                if (cache.PageTurnRightY != 0) pageTurnRightPosY = cache.PageTurnRightY;
+                if (cache.OverlayGraphics != null && cache.OverlayGraphics.Length > 0)
+                    overlayGraphics = cache.OverlayGraphics;
+                _contentOffsetX = cache.ContentOffsetX;
+                _contentOffsetY = cache.ContentOffsetY;
+                if (cache.TextColor != 0) _textColor = cache.TextColor;
+                if (cache.SpellNameColor != 0) _spellNameColor = cache.SpellNameColor;
+                _titleColor = cache.TitleColor;
+            }
+
+            Add(_picBase = new GumpPic(0, 0, bookGraphic, bookHue));
             _picBase.MouseDoubleClick += _picBase_MouseDoubleClick;
 
-            _dataBox = new DataBox(0, 0, 0, 0)
+            if (overlayGraphics != null)
+            {
+                foreach (ushort overlay in overlayGraphics)
+                {
+                    var overlayPic = new GumpPic(0, 0, overlay, 0);
+                    overlayPic.AcceptMouseInput = false;
+                    Add(overlayPic);
+                }
+            }
+
+            _dataBox = new DataBox(_contentOffsetX, _contentOffsetY, 0, 0)
             {
                 CanMove = true,
                 AcceptMouseInput = true,
@@ -132,20 +192,90 @@ namespace ClassicUO.Game.UI.Gumps
             Add(_hitBox);
             _hitBox.MouseUp += _hitBox_MouseUp;
 
-            Add(_pageCornerLeft = new GumpPic(50, 8, 0x08BB, 0));
+            Add(_pageCornerLeft = new GumpPic(pageTurnLeftPosX, pageTurnLeftPosY, pageTurnLeftGfx, 0));
             _pageCornerLeft.LocalSerial = 0;
             _pageCornerLeft.Page = int.MaxValue;
             _pageCornerLeft.MouseUp += PageCornerOnMouseClick;
             _pageCornerLeft.MouseDoubleClick += PageCornerOnMouseDoubleClick;
-            Add(_pageCornerRight = new GumpPic(321, 8, 0x08BC, 0));
+            Add(_pageCornerRight = new GumpPic(pageTurnRightPosX, pageTurnRightPosY, pageTurnRightGfx, 0));
             _pageCornerRight.LocalSerial = 1;
             _pageCornerRight.Page = 1;
             _pageCornerRight.MouseUp += PageCornerOnMouseClick;
             _pageCornerRight.MouseDoubleClick += PageCornerOnMouseDoubleClick;
 
+            if (_isDynamicSpellbook)
+            {
+                if (cache != null)
+                {
+                    UpdateSpellBitmaskFromServer(cache.SpellBitmask);
+                    SpellbookCacheManager.Instance.SyncCachedSpellsToRegistry((byte)_spellBookType);
+                }
+                else
+                {
+                    ShowLoadingState();
+                }
+
+                _isWaitingForSpellbookData = true;
+
+                AsyncNetClient.Socket.Send_SpellbookRequest(
+                    LocalSerial,
+                    (byte)_spellBookType,
+                    cache?.Version ?? 0u,
+                    false
+                );
+            }
+
             RequestUpdateContents();
 
             Client.Game.Audio.PlaySound(0x0055);
+        }
+
+        private void ShowLoadingState()
+        {
+            _loadingLabel = new Label("Loading spells...", false, _textColor, font: 6)
+            {
+                X = 100,
+                Y = 80
+            };
+            _dataBox.Add(_loadingLabel, 1);
+        }
+
+        private void UpdateSpellBitmaskFromServer(ulong spellBitmask)
+        {
+            for (int i = 0; i < 64; i++)
+            {
+                _spells[i] = (spellBitmask & (1UL << i)) != 0;
+            }
+        }
+
+        public void OnCacheValidated(ulong spellBitmask)
+        {
+            _isWaitingForSpellbookData = false;
+            UpdateSpellBitmaskFromServer(spellBitmask);
+
+            SpellbookCacheManager.Instance.SyncCachedSpellsToRegistry((byte)_spellBookType);
+
+            RequestUpdateContents();
+        }
+
+        public void OnSpellbookDataReceived()
+        {
+            _isWaitingForSpellbookData = false;
+
+            var cache = SpellbookCacheManager.Instance.GetCachedSpellbook((byte)_spellBookType);
+            if (cache != null)
+            {
+                UpdateSpellBitmaskFromServer(cache.SpellBitmask);
+
+                if (_picBase != null && _picBase.Graphic != cache.BookGraphic)
+                {
+                    Clear();
+                    BuildGump();
+                    return;
+                }
+            }
+
+            RequestUpdateContents();
         }
 
         private void _picBase_MouseDoubleClick(object sender, MouseDoubleClickEventArgs e)
@@ -186,6 +316,10 @@ namespace ClassicUO.Game.UI.Gumps
                 out int dictionaryPagesCount
             );
 
+            SpellbookCacheEntry dynamicCache = _isDynamicSpellbook
+                ? SpellbookCacheManager.Instance.GetCachedSpellbook((byte)_spellBookType)
+                : null;
+
             int totalSpells = 0;
 
             Item item = World.Items.Get(LocalSerial);
@@ -214,11 +348,32 @@ namespace ClassicUO.Game.UI.Gumps
                 }
             }
 
-            int pagesToFill =
-                _spellBookType == SpellBookType.Mastery
-                    ? dictionaryPagesCount
-                    : dictionaryPagesCount >> 1;
+            if (_isDynamicSpellbook && totalSpells == 0)
+            {
+                for (int i = 0; i < maxSpellsCount; i++)
+                {
+                    if (_spells[i])
+                        totalSpells++;
+                }
+            }
 
+            int pagesToFill;
+            if (_spellBookType == SpellBookType.Mastery)
+            {
+                pagesToFill = dictionaryPagesCount;
+            }
+            else if (_isDynamicSpellbook)
+            {
+                pagesToFill = (dictionaryPagesCount + 1) >> 1;
+            }
+            else
+            {
+                pagesToFill = dictionaryPagesCount >> 1;
+            }
+
+            int infoSpreads = _isDynamicSpellbook ? BuildInfoPages(dynamicCache) : 0;
+
+            pagesToFill += infoSpreads;
             _maxPage = pagesToFill + ((totalSpells + 1) >> 1);
 
             int currentSpellIndex = 0;
@@ -307,12 +462,13 @@ namespace ClassicUO.Game.UI.Gumps
             }
 
             int spellDone = 0;
+            int dictStartPage = infoSpreads + 1;
 
-            for (int page = 1; page <= pagesToFill; page++)
+            for (int page = dictStartPage; page <= pagesToFill; page++)
             {
                 for (int j = 0; j < 2; j++)
                 {
-                    if (page == 1
+                    if (page == dictStartPage
                         && (Settings.GlobalSettings.CustomServer == Settings.CustomServers.Eventine
                             ? _spellBookType == SpellBookType.Chivalry || _spellBookType == SpellBookType.Cleric
                             : _spellBookType == SpellBookType.Chivalry))
@@ -327,7 +483,7 @@ namespace ClassicUO.Game.UI.Gumps
                         var label = new Label(
                             $"{tithingLabel} {World.Player.TithingPoints}",
                             false,
-                            0x0288,
+                            _textColor,
                             font: 6
                         )
                         {
@@ -337,10 +493,35 @@ namespace ClassicUO.Game.UI.Gumps
 
                         _dataBox.Add(label, page);
                     }
+                    else if (page == dictStartPage && j == 0 && _isDynamicSpellbook && dynamicCache != null && !string.IsNullOrEmpty(dynamicCache.CustomPropertyName))
+                    {
+                        object value = GetPropertyOrFieldValue(World.Player, dynamicCache.CustomPropertyName);
+
+                        if (value != null)
+                        {
+                            if (!string.IsNullOrEmpty(dynamicCache.CustomPropertyTitle))
+                            {
+                                _dataBox.Add(new Label(dynamicCache.CustomPropertyTitle, false, _textColor, font: 6)
+                                {
+                                    X = 62, Y = 152
+                                }, page);
+                            }
+
+                            string valueText = string.IsNullOrEmpty(dynamicCache.CustomPropertyLabel)
+                                ? value.ToString()
+                                : $"{dynamicCache.CustomPropertyLabel}: {value}";
+
+                            _dataBox.Add(new Label(valueText, false, _textColor, font: 6)
+                            {
+                                X = 62, Y = 167
+                            }, page);
+                        }
+                    }
 
                     int indexX = 106;
                     int dataX = 62;
                     int y = 0;
+                    int yAdj = _isDynamicSpellbook ? -_contentOffsetY : 0;
 
                     if (j % 2 != 0)
                     {
@@ -348,17 +529,19 @@ namespace ClassicUO.Game.UI.Gumps
                         dataX = 225;
                     }
 
-                    var text = new Label(TazLang.Get("index"), false, 0x0288, font: 6)
+                    ushort titleHue = _titleColor != 0 ? _titleColor : _textColor;
+
+                    var text = new Label(TazLang.Get("index"), false, titleHue, font: 6)
                     {
                         X = indexX,
-                        Y = 10
+                        Y = 10 + yAdj
                     };
 
                     _dataBox.Add(text, page);
 
                     if (_spellBookType == SpellBookType.Mastery && j >= 1)
                     {
-                        text = new Label(TazLang.Get("abilities"), false, 0x0288, font: 6)
+                        text = new Label(TazLang.Get("abilities"), false, _textColor, font: 6)
                         {
                             X = dataX,
                             Y = 30
@@ -394,7 +577,7 @@ namespace ClassicUO.Game.UI.Gumps
                                 icon.MouseDoubleClick += OnIconDoubleClick;
                                 icon.DragBegin += OnIconDragBegin;
 
-                                text = new Label(spell.GetLocalizedName(), false, 0x0288, 80, 6)
+                                text = new Label(spell.GetLocalizedName(), false, _textColor, 80, 6)
                                 {
                                     X = 225 + 44 + 4,
                                     Y = iconMY + 2
@@ -424,7 +607,7 @@ namespace ClassicUO.Game.UI.Gumps
                         text = new Label(
                             SpellsMagery.CircleNames[(page - 1) * 2 + j % 2],
                             false,
-                            0x0288,
+                            _textColor,
                             font: 6
                         )
                         {
@@ -434,12 +617,31 @@ namespace ClassicUO.Game.UI.Gumps
 
                         _dataBox.Add(text, page);
                     }
+                    else if (_isDynamicSpellbook && dynamicCache?.PageNames != null)
+                    {
+                        int pageNameIndex = (page - dictStartPage) * 2 + j % 2;
+                        if (pageNameIndex < dynamicCache.PageNames.Length)
+                        {
+                            text = new Label(
+                                dynamicCache.PageNames[pageNameIndex],
+                                false,
+                                titleHue,
+                                font: 6
+                            )
+                            {
+                                X = dataX,
+                                Y = 30 + yAdj
+                            };
+
+                            _dataBox.Add(text, page);
+                        }
+                    }
                     else if (_spellBookType == SpellBookType.Mastery)
                     {
                         text = new Label(
                             page == pagesToFill ? TazLang.Get("passive") : TazLang.Get("activated"),
                             false,
-                            0x0288,
+                            _textColor,
                             font: 6
                         )
                         {
@@ -479,9 +681,9 @@ namespace ClassicUO.Game.UI.Gumps
                                 text = new HoveredLabel(
                                     name,
                                     false,
-                                    0x0288,
+                                    _spellNameColor,
                                     0x33,
-                                    0x0288,
+                                    _spellNameColor,
                                     font: 9,
                                     maxwidth: 130,
                                     style: FontStyle.Cropped
@@ -526,16 +728,16 @@ namespace ClassicUO.Game.UI.Gumps
                                 text = new HoveredLabel(
                                     name,
                                     false,
-                                    0x0288,
+                                    _spellNameColor,
                                     0x33,
-                                    0x0288,
+                                    _spellNameColor,
                                     font: 9,
                                     maxwidth: 130,
                                     style: FontStyle.Cropped
                                 )
                                 {
                                     X = dataX,
-                                    Y = 52 + y,
+                                    Y = 52 + y + yAdj,
                                     LocalSerial = (uint)topage,
                                     AcceptMouseInput = true,
                                     Tag = currentSpellIndex + 1,
@@ -554,7 +756,7 @@ namespace ClassicUO.Game.UI.Gumps
             }
 
             int page1 = pagesToFill + 1;
-            int topTextY = 6;
+            int topTextY = 6 - _contentOffsetY;
 
             for (int i = 0, spellsDone = 0; i < maxSpellsCount; i++)
             {
@@ -594,7 +796,7 @@ namespace ClassicUO.Game.UI.Gumps
                             var text = new Label(
                                 SpellsMagery.CircleNames[i >> 3],
                                 false,
-                                0x0288,
+                                _textColor,
                                 font: 6
                             )
                             {
@@ -604,7 +806,7 @@ namespace ClassicUO.Game.UI.Gumps
 
                             _dataBox.Add(text, page1);
 
-                            text = new Label(name, false, 0x0288, 80, 6) { X = iconTextX, Y = 34 };
+                            text = new Label(name, false, _textColor, 80, 6) { X = iconTextX, Y = 34 };
 
                             _dataBox.Add(text, page1);
                             int abbreviatureY = 26;
@@ -616,7 +818,7 @@ namespace ClassicUO.Game.UI.Gumps
 
                             abbreviatureY += text.Height;
 
-                            text = new Label(abbreviature, false, 0x0288, font: 8)
+                            text = new Label(abbreviature, false, _textColor, font: 8)
                             {
                                 X = iconTextX,
                                 Y = abbreviatureY
@@ -632,7 +834,7 @@ namespace ClassicUO.Game.UI.Gumps
                             var text = new Label(
                                 SpellsMastery.GetMasteryGroupByID(i + 1),
                                 false,
-                                0x0288,
+                                _textColor,
                                 font: 6
                             )
                             {
@@ -642,7 +844,7 @@ namespace ClassicUO.Game.UI.Gumps
 
                             _dataBox.Add(text, page1);
 
-                            text = new Label(name, false, 0x0288, 80, 6) { X = iconTextX, Y = 34 };
+                            text = new Label(name, false, _textColor, 80, 6) { X = iconTextX, Y = 34 };
 
                             _dataBox.Add(text, page1);
 
@@ -657,7 +859,7 @@ namespace ClassicUO.Game.UI.Gumps
 
                                 abbreviatureY += text.Height;
 
-                                text = new Label(abbreviature, false, 0x0288, 80, 6)
+                                text = new Label(abbreviature, false, _textColor, 80, 6)
                                 {
                                     X = iconTextX,
                                     Y = abbreviatureY
@@ -671,23 +873,61 @@ namespace ClassicUO.Game.UI.Gumps
 
                     default:
                         {
-                            var text = new Label(name, false, 0x0288, font: 6)
+                            if (_isDynamicSpellbook)
                             {
-                                X = topTextX,
-                                Y = topTextY
-                            };
-
-                            _dataBox.Add(text, page1);
-
-                            if (!string.IsNullOrEmpty(abbreviature))
-                            {
-                                text = new Label(abbreviature, false, 0x0288, 80, 6)
+                                if (dynamicCache?.PageNames != null && dynamicCache.SpellsPerPageSide > 0)
                                 {
-                                    X = iconTextX,
-                                    Y = 34
+                                    int pageNameIdx = i / dynamicCache.SpellsPerPageSide;
+                                    if (pageNameIdx < dynamicCache.PageNames.Length)
+                                    {
+                                        ushort detailTitleHue = _titleColor != 0 ? _titleColor : _textColor;
+                                        var headerText = new Label(dynamicCache.PageNames[pageNameIdx], false, detailTitleHue, font: 6)
+                                        {
+                                            X = topTextX,
+                                            Y = topTextY + 4
+                                        };
+                                        _dataBox.Add(headerText, page1);
+                                    }
+                                }
+
+                                var text = new Label(name, false, _textColor, 80, 6) { X = iconTextX, Y = 34 };
+                                _dataBox.Add(text, page1);
+
+                                if ((dynamicCache == null || dynamicCache.DisplayPowerWords) && !string.IsNullOrEmpty(abbreviature))
+                                {
+                                    int abbreviatureY = 26;
+                                    if (text.Height < 24)
+                                        abbreviatureY = 31;
+                                    abbreviatureY += text.Height;
+
+                                    text = new Label(abbreviature, false, _textColor, font: 8)
+                                    {
+                                        X = iconTextX,
+                                        Y = abbreviatureY
+                                    };
+                                    _dataBox.Add(text, page1);
+                                }
+                            }
+                            else
+                            {
+                                var text = new Label(name, false, _textColor, font: 6)
+                                {
+                                    X = topTextX,
+                                    Y = topTextY
                                 };
 
                                 _dataBox.Add(text, page1);
+
+                                if (!string.IsNullOrEmpty(abbreviature))
+                                {
+                                    text = new Label(abbreviature, false, _textColor, 80, 6)
+                                    {
+                                        X = iconTextX,
+                                        Y = 34
+                                    };
+
+                                    _dataBox.Add(text, page1);
+                                }
                             }
 
                             break;
@@ -698,11 +938,23 @@ namespace ClassicUO.Game.UI.Gumps
                 int toolTipCliloc;
 
                 SpellDefinition spellDef = GetSpellDefinition(iconSerial);
+
+                if (spellDef == null)
+                {
+                    continue;
+                }
+
                 if (_spellBookType == SpellBookType.Mastery)
                 {
                     iconGraphic = (ushort)SpellsMastery.GetSpell(i + 1).GumpIconID;
 
                     toolTipCliloc = i >= 0 && i < 6 ? 1115689 : 1155938 - 6;
+                }
+                else if (_isDynamicSpellbook)
+                {
+                    var def = DynamicSpellbookRegistry.GetSpell(_spellBookType, i + 1);
+                    iconGraphic = (ushort)def.GumpIconID;
+                    GetSpellToolTip(out toolTipCliloc);
                 }
                 else
                 {
@@ -730,6 +982,16 @@ namespace ClassicUO.Game.UI.Gumps
                     string tooltip = Client.Game.UO.FileManager.Clilocs.GetString(toolTipCliloc + i);
                     icon.SetTooltip(tooltip);
                 }
+                else if (_isDynamicSpellbook && dynamicCache != null)
+                {
+                    int baseSpellID = SpellbookCacheManager.Instance.GetSpellBookBaseId(_spellBookType);
+                    ushort spellID = (ushort)(baseSpellID + i);
+                    var dynSpell = dynamicCache.GetSpell(spellID);
+                    if (dynSpell != null && !string.IsNullOrEmpty(dynSpell.Description))
+                    {
+                        icon.SetTooltip(dynSpell.Description);
+                    }
+                }
 
                 icon.MouseDoubleClick += OnIconDoubleClick;
                 icon.DragBegin += OnIconDragBegin;
@@ -744,7 +1006,7 @@ namespace ClassicUO.Game.UI.Gumps
                     }
 
                     var reagentsLabel = Client.Game.UO.FileManager.Clilocs?.GetString(3001017) ?? TazLang.Get("reagents");
-                    var text = new Label(reagentsLabel, false, 0x0288, font: 6)
+                    var text = new Label(reagentsLabel, false, _textColor, font: 6)
                     {
                         X = iconX,
                         Y = 92
@@ -752,26 +1014,139 @@ namespace ClassicUO.Game.UI.Gumps
 
                     _dataBox.Add(text, page1);
 
-                    text = new Label(reagents, false, 0x0288, font: 9) { X = iconX, Y = 114 };
+                    text = new Label(reagents, false, _textColor, font: 9) { X = iconX, Y = 114 };
 
                     _dataBox.Add(text, page1);
                 }
 
                 if (_spellBookType != SpellBookType.Magery)
                 {
-                    GetSpellRequires(i, out int requiriesY, out string requires);
-
-                    var text = new Label(requires, false, 0x0288, font: 6)
+                    if (_isDynamicSpellbook)
                     {
-                        X = iconX,
-                        Y = requiriesY
-                    };
+                        var dynSpell = dynamicCache?.GetSpellByIndex(i + 1);
+                        if (dynSpell != null)
+                        {
+                            bool showBoth = dynamicCache.DisplayManaCost && dynamicCache.DisplayMinSkill;
+                            int manaY = showBoth ? 162 : 175;
+                            int skillY = 175;
 
-                    _dataBox.Add(text, page1);
+                            if (dynamicCache.DisplayManaCost)
+                            {
+                                string mcLabel = dynamicCache.ManaCostLabel ?? "Mana Cost";
+                                Label manaLabel = new Label($"{mcLabel}: {dynSpell.ManaCost}", false, _textColor, font: 6)
+                                {
+                                    X = iconX,
+                                    Y = manaY
+                                };
+                                _dataBox.Add(manaLabel, page1);
+                            }
+
+                            if (dynamicCache.DisplayMinSkill)
+                            {
+                                string msLabel = dynamicCache.MinSkillLabel ?? "Min. Skill";
+                                Label skillLabel = new Label($"{msLabel}: {dynSpell.MinSkill}", false, _textColor, font: 6)
+                                {
+                                    X = iconX,
+                                    Y = skillY
+                                };
+                                _dataBox.Add(skillLabel, page1);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        GetSpellRequires(i, out int requiriesY, out string requires);
+
+                        var text = new Label(requires, false, _textColor, font: 6)
+                        {
+                            X = iconX,
+                            Y = requiriesY
+                        };
+
+                        _dataBox.Add(text, page1);
+                    }
                 }
             }
 
+            if (_isDynamicSpellbook)
+                BuildBookmark(dynamicCache?.Bookmark);
+
+            _dataBox.ActivePage = 0;
             SetActivePage(1);
+        }
+
+        private const int BOOKMARK_BUTTON_ID = 0x10000;
+
+        private int BuildInfoPages(SpellbookCacheEntry cache)
+        {
+            if (cache?.InfoPages == null || cache.InfoPages.Count == 0)
+                return 0;
+
+            int infoPagesCount = cache.InfoPages.Count;
+            int infoSpreads = (infoPagesCount + 1) >> 1;
+            ushort titleHue = _titleColor != 0 ? _titleColor : _textColor;
+
+            for (int s = 0; s < infoSpreads; s++)
+            {
+                int spreadPage = s + 1;
+
+                for (int side = 0; side < 2; side++)
+                {
+                    int infoIdx = s * 2 + side;
+                    if (infoIdx >= infoPagesCount)
+                        break;
+
+                    var info = cache.InfoPages[infoIdx];
+                    int textX = side == 0 ? 62 : 225;
+                    int maxWidth = 140;
+                    int textY = 10 - _contentOffsetY;
+
+                    if (!string.IsNullOrEmpty(info.Title))
+                    {
+                        _dataBox.Add(new Label(info.Title, false, titleHue, maxWidth, font: 6)
+                        {
+                            X = textX,
+                            Y = textY
+                        }, spreadPage);
+                        textY += 20;
+                    }
+
+                    if (!string.IsNullOrEmpty(info.Body))
+                    {
+                        _dataBox.Add(new Label(info.Body, false, _textColor, maxWidth, font: 9)
+                        {
+                            X = textX,
+                            Y = textY
+                        }, spreadPage);
+                    }
+                }
+            }
+
+            return infoSpreads;
+        }
+
+        private void BuildBookmark(SpellbookBookmarkInfo bookmark)
+        {
+            if (bookmark == null || bookmark.Graphic == 0 || bookmark.ActionType == SpellbookBookmarkAction.None)
+                return;
+
+            ushort pressed = bookmark.PressedGraphic != 0 ? bookmark.PressedGraphic : bookmark.Graphic;
+
+            var btn = new Button(BOOKMARK_BUTTON_ID, bookmark.Graphic, pressed)
+            {
+                X = bookmark.X,
+                Y = bookmark.Y,
+                ButtonAction = ButtonAction.Activate,
+                Hue = bookmark.Hue
+            };
+
+            if (!string.IsNullOrEmpty(bookmark.Tooltip))
+                btn.SetTooltip(bookmark.Tooltip);
+
+            if (bookmark.DisplayPage == 0)
+                _dataBox.Add(btn);
+            else
+                _dataBox.Add(btn, bookmark.DisplayPage);
         }
 
         protected override void UpdateContents()
@@ -860,6 +1235,15 @@ namespace ClassicUO.Game.UI.Gumps
 
         private static SpellDefinition GetSpellDefinition(SpellBookType type, int idx)
         {
+            if (DynamicSpellbookRegistry.IsDynamic(type))
+            {
+                SpellDefinition def = DynamicSpellbookRegistry.GetSpell(type, idx);
+                if (def != null && def.ID != 0)
+                {
+                    return def;
+                }
+            }
+
             switch (type)
             {
                 case SpellBookType.Magery:
@@ -962,15 +1346,33 @@ namespace ClassicUO.Game.UI.Gumps
             out int dictionaryPagesCount
         )
         {
+            if (DynamicSpellbookRegistry.IsDynamic(type))
+            {
+                var cache = SpellbookCacheManager.Instance.GetCachedSpellbook((byte)type);
+                if (cache != null)
+                {
+                    maxSpellsCount = cache.Spells.Count;
+                    bookGraphic = cache.BookGraphic;
+                    minimizedGraphic = cache.MinimizedGraphic;
+                    iconStartGraphic = 0;
+                    spellsOnPage = cache.SpellsPerPageSide;
+                    dictionaryPagesCount = cache.MaxDictionaryPages;
+
+                    if (dictionaryPagesCount % 2 != 0)
+                    {
+                        dictionaryPagesCount++;
+                    }
+                    return;
+                }
+            }
+
             switch (type)
             {
-                default:
                 case SpellBookType.Magery:
                     maxSpellsCount = SpellsMagery.MaxSpellCount;
                     bookGraphic = 0x08AC;
                     minimizedGraphic = 0x08BA;
                     iconStartGraphic = 0x08C0;
-
                     break;
 
                 case SpellBookType.Necromancy:
@@ -978,7 +1380,6 @@ namespace ClassicUO.Game.UI.Gumps
                     bookGraphic = 0x2B00;
                     minimizedGraphic = 0x2B03;
                     iconStartGraphic = 0x5000;
-
                     break;
 
                 case SpellBookType.Chivalry:
@@ -986,7 +1387,6 @@ namespace ClassicUO.Game.UI.Gumps
                     bookGraphic = 0x2B01;
                     minimizedGraphic = 0x2B04;
                     iconStartGraphic = 0x5100;
-
                     break;
 
                 case SpellBookType.Bushido:
@@ -994,7 +1394,6 @@ namespace ClassicUO.Game.UI.Gumps
                     bookGraphic = 0x2B07;
                     minimizedGraphic = 0x2B09;
                     iconStartGraphic = 0x5400;
-
                     break;
 
                 case SpellBookType.Ninjitsu:
@@ -1002,7 +1401,6 @@ namespace ClassicUO.Game.UI.Gumps
                     bookGraphic = 0x2B06;
                     minimizedGraphic = 0x2B08;
                     iconStartGraphic = 0x5300;
-
                     break;
 
                 case SpellBookType.Spellweaving:
@@ -1010,7 +1408,6 @@ namespace ClassicUO.Game.UI.Gumps
                     bookGraphic = 0x2B2F;
                     minimizedGraphic = 0x2B2D;
                     iconStartGraphic = 0x59D8;
-
                     break;
 
                 case SpellBookType.Mysticism:
@@ -1018,7 +1415,6 @@ namespace ClassicUO.Game.UI.Gumps
                     bookGraphic = 0x2B32;
                     minimizedGraphic = 0x2B30;
                     iconStartGraphic = 0x5DC0;
-
                     break;
 
                 case SpellBookType.Mastery:
@@ -1026,7 +1422,13 @@ namespace ClassicUO.Game.UI.Gumps
                     bookGraphic = 0x8AC;
                     minimizedGraphic = 0x08BA;
                     iconStartGraphic = 0x945;
+                    break;
 
+                default:
+                    maxSpellsCount = 64;
+                    bookGraphic = 0x08AC;
+                    minimizedGraphic = 0x08BA;
+                    iconStartGraphic = 0x08C0;
                     break;
 
                 case SpellBookType.Druidic when Settings.GlobalSettings.CustomServer == Settings.CustomServers.Eventine:
@@ -1121,6 +1523,18 @@ namespace ClassicUO.Game.UI.Gumps
             out string reagents
         )
         {
+            if (_isDynamicSpellbook)
+            {
+                SpellDefinition dynDef = DynamicSpellbookRegistry.GetSpell(_spellBookType, offset + 1);
+                if (dynDef != null && dynDef.ID != 0)
+                {
+                    name = dynDef.Name;
+                    abbreviature = dynDef.PowerWords;
+                    reagents = dynDef.CreateReagentListString("\n");
+                    return;
+                }
+            }
+
             switch (_spellBookType)
             {
                 default:
@@ -1129,7 +1543,6 @@ namespace ClassicUO.Game.UI.Gumps
                     name = def.GetLocalizedName();
                     abbreviature = SpellsMagery.SpecialReagentsChars[offset];
                     reagents = def.CreateReagentListString("\n");
-
                     break;
 
                 case SpellBookType.Necromancy:
@@ -1137,7 +1550,6 @@ namespace ClassicUO.Game.UI.Gumps
                     name = def.GetLocalizedName();
                     abbreviature = def.PowerWords;
                     reagents = def.CreateReagentListString("\n");
-
                     break;
 
                 case SpellBookType.Chivalry:
@@ -1145,7 +1557,6 @@ namespace ClassicUO.Game.UI.Gumps
                     name = def.GetLocalizedName();
                     abbreviature = def.PowerWords;
                     reagents = string.Empty;
-
                     break;
 
                 case SpellBookType.Bushido:
@@ -1153,7 +1564,6 @@ namespace ClassicUO.Game.UI.Gumps
                     name = def.GetLocalizedName();
                     abbreviature = def.PowerWords;
                     reagents = string.Empty;
-
                     break;
 
                 case SpellBookType.Ninjitsu:
@@ -1161,7 +1571,6 @@ namespace ClassicUO.Game.UI.Gumps
                     name = def.GetLocalizedName();
                     abbreviature = def.PowerWords;
                     reagents = string.Empty;
-
                     break;
 
                 case SpellBookType.Spellweaving:
@@ -1169,7 +1578,6 @@ namespace ClassicUO.Game.UI.Gumps
                     name = def.GetLocalizedName();
                     abbreviature = def.PowerWords;
                     reagents = string.Empty;
-
                     break;
 
                 case SpellBookType.Mysticism:
@@ -1177,7 +1585,6 @@ namespace ClassicUO.Game.UI.Gumps
                     name = def.GetLocalizedName();
                     abbreviature = def.PowerWords;
                     reagents = def.CreateReagentListString("\n");
-
                     break;
 
                 case SpellBookType.Mastery:
@@ -1185,7 +1592,6 @@ namespace ClassicUO.Game.UI.Gumps
                     name = def.GetLocalizedName();
                     abbreviature = def.PowerWords;
                     reagents = def.CreateReagentListString("\n");
-
                     break;
 
                 case SpellBookType.Druidic when Settings.GlobalSettings.CustomServer == Settings.CustomServers.Eventine:
@@ -1311,6 +1717,14 @@ namespace ClassicUO.Game.UI.Gumps
                     minSkill = def.MinSkill;
 
                     break;
+
+                default:
+                    if (DynamicSpellbookRegistry.IsDynamic(_spellBookType))
+                    {
+                        text = string.Empty;
+                        return;
+                    }
+                    break;
             }
 
             text = string.Format(TazLang.Get("mana_cost0_min_skill1"), manaCost, minSkill);
@@ -1333,6 +1747,7 @@ namespace ClassicUO.Game.UI.Gumps
             }
 
             _dataBox.ActivePage = page;
+            _dataBox.WantUpdateSize = true;
             _pageCornerLeft.Page = _dataBox.ActivePage != 1 ? 0 : int.MaxValue;
             _pageCornerRight.Page = _dataBox.ActivePage != _maxPage ? 0 : int.MaxValue;
 
@@ -1405,9 +1820,16 @@ namespace ClassicUO.Game.UI.Gumps
 
         private static SpellBookType GetSpellBookType(World world, Item item)
         {
+            // Server-registered dynamic spellbooks share item graphics with stock books,
+            // so the per-serial registration wins over the graphic lookup.
+            SpellBookType? serialType = SpellbookTypeRegistry.GetTypeForSerial(item.Serial);
+            if (serialType.HasValue)
+            {
+                return serialType.Value;
+            }
+
             switch (item.Graphic)
             {
-                default:
                 case 0x0EFA:
                     return SpellBookType.Magery;
 
@@ -1423,7 +1845,6 @@ namespace ClassicUO.Game.UI.Gumps
                     {
                         return SpellBookType.Bushido;
                     }
-
                     break;
 
                 case 0x23A0:
@@ -1432,7 +1853,6 @@ namespace ClassicUO.Game.UI.Gumps
                     {
                         return SpellBookType.Ninjitsu;
                     }
-
                     break;
 
                 case 0x2D50:
@@ -1479,6 +1899,12 @@ namespace ClassicUO.Game.UI.Gumps
 
         public override void OnButtonClick(int buttonID)
         {
+            if (buttonID == BOOKMARK_BUTTON_ID)
+            {
+                OnBookmarkPressed();
+                return;
+            }
+
             switch ((ButtonCircle)buttonID)
             {
                 case ButtonCircle.Circle_1_2:
@@ -1499,6 +1925,34 @@ namespace ClassicUO.Game.UI.Gumps
                 case ButtonCircle.Circle_7_8:
                     SetActivePage(4);
 
+                    break;
+            }
+        }
+
+        private void OnBookmarkPressed()
+        {
+            if (!_isDynamicSpellbook)
+                return;
+
+            var cache = SpellbookCacheManager.Instance.GetCachedSpellbook((byte)_spellBookType);
+            var bookmark = cache?.Bookmark;
+            if (bookmark == null)
+                return;
+
+            switch (bookmark.ActionType)
+            {
+                case SpellbookBookmarkAction.JumpToPage:
+                    int target = (int)bookmark.Action;
+                    if (target >= 1 && target <= _maxPage)
+                        SetActivePage(target);
+                    break;
+
+                case SpellbookBookmarkAction.ServerCallback:
+                    AsyncNetClient.Socket.Send_SpellbookBookmarkPress(
+                        LocalSerial,
+                        (byte)_spellBookType,
+                        bookmark.Action
+                    );
                     break;
             }
         }
@@ -1631,6 +2085,23 @@ namespace ClassicUO.Game.UI.Gumps
             /// </summary>
             /// <returns></returns>
             private int GetSpellsId() => _spellID % 100;
+        }
+        private static object GetPropertyOrFieldValue(object obj, string memberName)
+        {
+            if (obj == null || string.IsNullOrEmpty(memberName))
+                return null;
+
+            var type = obj.GetType();
+
+            var prop = type.GetProperty(memberName, BindingFlags.Public | BindingFlags.Instance);
+            if (prop != null && prop.CanRead)
+                return prop.GetValue(obj);
+
+            var field = type.GetField(memberName, BindingFlags.Public | BindingFlags.Instance);
+            if (field != null)
+                return field.GetValue(obj);
+
+            return null;
         }
     }
 }

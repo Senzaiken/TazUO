@@ -119,5 +119,6 @@ public enum MacroType
     SetZoomLevel,
     LootHoveredItem,
     PrivateSay,
-    ToggleScavenging
+    ToggleScavenging,
+    CastCustomSpell
 }

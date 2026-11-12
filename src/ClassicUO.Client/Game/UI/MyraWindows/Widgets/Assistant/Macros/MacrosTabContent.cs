@@ -389,15 +389,31 @@ public static class MacrosTabContent
             // Sub-type dropdown
             if (capturedAction.SubMenuType == 1)
             {
-                int subCount = 0, subOffset = 0;
-                Macro.GetBoundByCode(capturedAction.Code, ref subCount, ref subOffset);
+                MacroSubType[] subValues;
+                string[] subNames;
+                int subCount;
 
-                var subValues = new MacroSubType[subCount];
-                string[] subNames = new string[subCount];
-                for (int si = 0; si < subCount; si++)
+                if (capturedAction.Code == MacroType.CastCustomSpell)
                 {
-                    subValues[si] = (MacroSubType)(si + subOffset);
-                    subNames[si] = Macro.GetSubTypeName(capturedAction.Code, subValues[si]);
+                    // Server-defined (dynamic spellbook) spells don't live in the MacroSubType range;
+                    // their sub-codes are the spell ids themselves.
+                    Macro.BuildSubCodePicker(capturedAction.Code, capturedAction.SubCode, out subNames, out int[] customSpellSubCodes, out _, out _);
+                    subValues = customSpellSubCodes.Select(code => (MacroSubType)code).ToArray();
+                    subCount = subValues.Length;
+                }
+                else
+                {
+                    int subOffset = 0;
+                    subCount = 0;
+                    Macro.GetBoundByCode(capturedAction.Code, ref subCount, ref subOffset);
+
+                    subValues = new MacroSubType[subCount];
+                    subNames = new string[subCount];
+                    for (int si = 0; si < subCount; si++)
+                    {
+                        subValues[si] = (MacroSubType)(si + subOffset);
+                        subNames[si] = Macro.GetSubTypeName(capturedAction.Code, subValues[si]);
+                    }
                 }
 
                 // The gump-list macro types (Open/Close/Minimize/Maximize/ToggleGump) show a list

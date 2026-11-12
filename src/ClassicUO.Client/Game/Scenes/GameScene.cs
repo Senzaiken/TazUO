@@ -226,6 +226,7 @@ namespace ClassicUO.Game.Scenes
 
             _world.CommandManager.Initialize();
             ItemDatabaseManager.Instance.Initialize();
+            SpellbookCacheManager.Instance.Initialize();
 
             var viewport = new WorldViewportGump(_world, this);
             UIManager.Add(viewport, false);

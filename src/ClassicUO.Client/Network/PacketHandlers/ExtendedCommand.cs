@@ -575,10 +575,224 @@ internal static class ExtendedCommand
 
                 break;
 
+            case 0x39:
+                OnSpellbookCacheValid(world, ref p);
+                break;
+
+            case 0x3A:
+                OnSpellbookFullData(world, ref p);
+                break;
+
+            case 0x3B:
+                OnInvalidateSpellbookCache(world, ref p);
+                break;
+
+            case 0x3D:
+                OnRegisterSpellbookSerial(world, ref p);
+                break;
+
             default:
                 Log.Warn($"Unhandled 0xBF - sub: {cmd.ToHex()}");
 
                 break;
         }
+    }
+
+    private static void OnSpellbookCacheValid(World world, ref StackDataReader p)
+    {
+        uint serial = p.ReadUInt32BE();
+        byte type = p.ReadUInt8();
+        uint version = p.ReadUInt32BE();
+        ulong spellBitmask = p.ReadUInt64BE();
+
+        SpellbookCacheManager.Instance.OnCacheValid(type, version, spellBitmask);
+
+        UIManager.GetGump<SpellbookGump>(serial)?.OnCacheValidated(spellBitmask);
+    }
+
+    private static void OnSpellbookFullData(World world, ref StackDataReader p)
+    {
+        var entry = ReadSpellbookEntry(ref p, out uint serial, out uint ttl);
+        SpellbookCacheManager.Instance.UpdateCache(entry, ttl);
+
+        var gump = UIManager.GetGump<SpellbookGump>(serial);
+        if (gump != null)
+            gump.OnSpellbookDataReceived();
+        else
+            UIManager.Add(new SpellbookGump(world, serial));
+    }
+
+    private static void OnInvalidateSpellbookCache(World world, ref StackDataReader p)
+    {
+        byte type = p.ReadUInt8();
+        _ = p.ReadUInt32BE();
+        byte flags = p.ReadUInt8();
+        bool forceReload = (flags & 0x01) != 0;
+
+        if (type == 0xFF)
+            SpellbookCacheManager.Instance.InvalidateAll();
+        else
+            SpellbookCacheManager.Instance.InvalidateCache(type);
+
+        if (!forceReload)
+            return;
+
+        LinkedListNode<IGui> first = UIManager.Gumps.First;
+        while (first != null)
+        {
+            LinkedListNode<IGui> next = first.Next;
+            if (first.Value is SpellbookGump sbGump && ((byte)sbGump.SpellBookType == type || type == 0xFF))
+            {
+                uint sbSerial = sbGump.LocalSerial;
+                sbGump.Dispose();
+                AsyncNetClient.Socket.Send_SpellbookRequest(sbSerial, type, 0, true);
+            }
+            first = next;
+        }
+    }
+
+    private static void OnRegisterSpellbookSerial(World world, ref StackDataReader p)
+    {
+        uint serial = p.ReadUInt32BE();
+        var bookType = (SpellBookType)p.ReadUInt8();
+
+        SpellbookTypeRegistry.RegisterSerial(serial, bookType);
+        DynamicSpellbookRegistry.RegisterDynamic(bookType);
+    }
+
+    private static SpellbookCacheEntry ReadSpellbookEntry(ref StackDataReader p, out uint serial, out uint ttl)
+    {
+        serial = p.ReadUInt32BE();
+
+        var entry = new SpellbookCacheEntry
+        {
+            SpellbookType = p.ReadUInt8(),
+            Version = p.ReadUInt32BE(),
+            SpellBitmask = p.ReadUInt64BE(),
+            BookGraphic = p.ReadUInt16BE(),
+            MinimizedGraphic = p.ReadUInt16BE()
+        };
+
+        byte spellCount = p.ReadUInt8();
+        ttl = p.ReadUInt32BE();
+        entry.SpellsPerPageSide = p.ReadUInt8();
+        entry.MaxDictionaryPages = p.ReadUInt8();
+        byte pageNameCount = p.ReadUInt8();
+
+        byte displayFlags = p.ReadUInt8();
+        entry.DisplayManaCost = (displayFlags & 0x01) != 0;
+        entry.DisplayMinSkill = (displayFlags & 0x02) != 0;
+        entry.DisplayPowerWords = (displayFlags & 0x04) != 0;
+
+        entry.BookHue = p.ReadUInt16BE();
+        entry.TextColor = p.ReadUInt16BE();
+        entry.SpellNameColor = p.ReadUInt16BE();
+        entry.ContentOffsetX = (short)p.ReadUInt16BE();
+        entry.ContentOffsetY = (short)p.ReadUInt16BE();
+        entry.PageTurnLeftGraphic = p.ReadUInt16BE();
+        entry.PageTurnRightGraphic = p.ReadUInt16BE();
+        entry.PageTurnLeftX = (short)p.ReadUInt16BE();
+        entry.PageTurnLeftY = (short)p.ReadUInt16BE();
+        entry.PageTurnRightX = (short)p.ReadUInt16BE();
+        entry.PageTurnRightY = (short)p.ReadUInt16BE();
+
+        byte overlayCount = p.ReadUInt8();
+        var overlays = new ushort[overlayCount];
+        for (int i = 0; i < overlayCount; i++)
+            overlays[i] = p.ReadUInt16BE();
+        entry.OverlayGraphics = overlays;
+
+        entry.CustomPropertyTitle = ReadOptionalAscii8(ref p);
+        entry.CustomPropertyLabel = ReadOptionalAscii8(ref p);
+        entry.CustomPropertyName = ReadOptionalAscii8(ref p);
+
+        var pageNames = new string[pageNameCount];
+        for (int i = 0; i < pageNameCount; i++)
+            pageNames[i] = ReadOptionalAscii8(ref p) ?? string.Empty;
+        entry.PageNames = pageNames;
+
+        var spells = new List<DynamicSpellDefinition>(spellCount);
+        for (int i = 0; i < spellCount; i++)
+            spells.Add(ReadSpellDefinition(ref p));
+
+        if (p.Remaining > 0)
+        {
+            entry.ManaCostLabel = ReadOptionalAscii8(ref p);
+            entry.MinSkillLabel = ReadOptionalAscii8(ref p);
+            entry.TitleColor = p.ReadUInt16BE();
+
+            byte infoPageCount = p.ReadUInt8();
+            var infoPages = new List<SpellbookInfoPage>(infoPageCount);
+            for (int i = 0; i < infoPageCount; i++)
+            {
+                infoPages.Add(new SpellbookInfoPage
+                {
+                    Title = ReadOptionalAscii16(ref p),
+                    Body = ReadOptionalAscii16(ref p)
+                });
+            }
+            entry.InfoPages = infoPages;
+
+            if (p.Remaining > 0 && p.ReadUInt8() != 0)
+            {
+                entry.Bookmark = new SpellbookBookmarkInfo
+                {
+                    Graphic = p.ReadUInt16BE(),
+                    PressedGraphic = p.ReadUInt16BE(),
+                    X = (short)p.ReadUInt16BE(),
+                    Y = (short)p.ReadUInt16BE(),
+                    Hue = p.ReadUInt16BE(),
+                    DisplayPage = p.ReadUInt8(),
+                    ActionType = p.ReadUInt8(),
+                    Action = p.ReadUInt32BE(),
+                    Tooltip = ReadOptionalAscii8(ref p)
+                };
+            }
+        }
+
+        entry.Spells = spells;
+        return entry;
+    }
+
+    private static DynamicSpellDefinition ReadSpellDefinition(ref StackDataReader p)
+    {
+        var spell = new DynamicSpellDefinition
+        {
+            SpellID = p.ReadUInt16BE(),
+            IconGraphic = p.ReadUInt16BE(),
+            NameCliloc = p.ReadInt32BE(),
+            Name = ReadOptionalAscii8(ref p),
+            PowerWords = ReadOptionalAscii8(ref p),
+            Description = ReadOptionalAscii8(ref p),
+            ManaCost = p.ReadUInt8(),
+            MinSkill = p.ReadUInt8(),
+            TargetType = p.ReadUInt8(),
+            Reagents = p.ReadUInt16BE()
+        };
+
+        byte customReagentCount = p.ReadUInt8();
+        if (customReagentCount > 0)
+        {
+            spell.CustomReagents = new string[customReagentCount];
+            for (int r = 0; r < customReagentCount; r++)
+                spell.CustomReagents[r] = ReadOptionalAscii8(ref p) ?? string.Empty;
+        }
+
+        spell.Cooldown = p.ReadUInt16BE();
+        spell.Page = p.ReadUInt8();
+
+        return spell;
+    }
+
+    private static string ReadOptionalAscii8(ref StackDataReader p)
+    {
+        byte len = p.ReadUInt8();
+        return len > 0 ? p.ReadASCII(len) : null;
+    }
+
+    private static string ReadOptionalAscii16(ref StackDataReader p)
+    {
+        ushort len = p.ReadUInt16BE();
+        return len > 0 ? p.ReadASCII(len) : null;
     }
 }

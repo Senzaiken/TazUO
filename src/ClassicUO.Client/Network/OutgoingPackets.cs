@@ -4726,5 +4726,49 @@ namespace ClassicUO.Network
             writer.WriteUInt32BE(serial); // Tools
             writer.WriteUInt16BE((ushort)resourceType); // Resource type
         }
+
+        public static void Send_SpellbookBookmarkPress(
+            this AsyncNetClient socket,
+            uint spellbookSerial,
+            byte spellbookType,
+            uint token)
+        {
+            const byte ID = 0xBF;
+            const int length = 14;
+
+            var writer = new StackDataWriter(length);
+            writer.WriteUInt8(ID);
+            writer.WriteUInt16BE(length);
+            writer.WriteUInt16BE(0x3E); // Subcommand: SpellbookBookmarkPress
+            writer.WriteUInt32BE(spellbookSerial);
+            writer.WriteUInt8(spellbookType);
+            writer.WriteUInt32BE(token);
+
+            socket.Send(writer.BufferWritten);
+            writer.Dispose();
+        }
+
+        public static void Send_SpellbookRequest(
+            this AsyncNetClient socket,
+            uint spellbookSerial,
+            byte spellbookType,
+            uint cachedVersion,
+            bool forceRefresh = false)
+        {
+            const byte ID = 0xBF;
+            const int length = 15;
+
+            var writer = new StackDataWriter(length);
+            writer.WriteUInt8(ID);
+            writer.WriteUInt16BE(length); // Length
+            writer.WriteUInt16BE(0x38); // Subcommand: SpellbookRequest
+            writer.WriteUInt32BE(spellbookSerial);
+            writer.WriteUInt8(spellbookType);
+            writer.WriteUInt32BE(cachedVersion);
+            writer.WriteUInt8((byte)(forceRefresh ? 0x01 : 0x00));
+
+            socket.Send(writer.BufferWritten);
+            writer.Dispose();
+        }
     }
 }

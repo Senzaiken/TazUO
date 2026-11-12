@@ -58,6 +58,7 @@ namespace ClassicUO.Game.Data
             TithingCost = tithingcost;
             TargetType = target;
             ClilocNumber = clilocNumber;
+            Description = "";
             AddToWatchedSpell();
         }
 
@@ -85,6 +86,7 @@ namespace ClassicUO.Game.Data
             TithingCost = 0;
             TargetType = target;
             ClilocNumber = clilocNumber;
+            Description = "";
             AddToWatchedSpell();
         }
 
@@ -110,6 +112,38 @@ namespace ClassicUO.Game.Data
             PowerWords = powerwords;
             TargetType = target;
             ClilocNumber = clilocNumber;
+            Description = "";
+            AddToWatchedSpell();
+        }
+
+        public SpellDefinition
+        (
+            string name,
+            int index,
+            int gumpIconID,
+            int gumpSmallIconID,
+            string powerwords,
+            int manacost,
+            int minskill,
+            int tithingcost,
+            TargetType target,
+            Reagents[] regs,
+            string description,
+            int clilocNumber = 0
+        )
+        {
+            Name = name;
+            ID = index;
+            GumpIconID = gumpIconID;
+            GumpIconSmallID = gumpSmallIconID;
+            Regs = regs;
+            ManaCost = manacost;
+            MinSkill = minskill;
+            PowerWords = powerwords;
+            TithingCost = tithingcost;
+            TargetType = target;
+            Description = description ?? "";
+            ClilocNumber = clilocNumber;
             AddToWatchedSpell();
         }
 
@@ -126,6 +160,7 @@ namespace ClassicUO.Game.Data
         public readonly Reagents[] Regs;
         public readonly TargetType TargetType;
         public readonly int TithingCost;
+        public readonly string Description;
         public readonly int ClilocNumber;
 
         public string GetLocalizedName()
@@ -395,7 +430,19 @@ namespace ClassicUO.Game.Data
 
         public static SpellDefinition FullIndexGetSpell(int fullidx)
         {
-            if (fullidx < 1 || fullidx > 799) return EmptySpell;
+            if (fullidx < 1) return EmptySpell;
+
+            if (fullidx >= 2000)
+            {
+                var bookType = SpellbookCacheManager.Instance.GetSpellBookType(fullidx);
+                if (bookType.HasValue)
+                {
+                    int baseId = SpellbookCacheManager.Instance.GetSpellBookBaseId(bookType.Value);
+                    int spellIndex = fullidx - baseId;
+                    return DynamicSpellbookRegistry.GetSpell(bookType.Value, spellIndex);
+                }
+                return EmptySpell;
+            }
 
             if (fullidx < 100) return SpellsMagery.GetSpell(fullidx);
 
@@ -420,7 +467,12 @@ namespace ClassicUO.Game.Data
 
             if (fullidx < 700) return SpellsMysticism.GetSpell((fullidx - 77) % 100);
 
-            return SpellsMastery.GetSpell(fullidx % 100);
+            if (fullidx < 800)
+            {
+                return SpellsMastery.GetSpell(fullidx % 100);
+            }
+
+            return EmptySpell;
         }
 
         public static SpellDefinition[] GetAllSpells() => [
