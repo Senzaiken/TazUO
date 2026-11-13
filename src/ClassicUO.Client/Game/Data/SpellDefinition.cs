@@ -484,6 +484,7 @@ namespace ClassicUO.Game.Data
                 .. SpellsSpellweaving.GetAllSpells.Values,
                 .. SpellsMysticism.GetAllSpells.Values,
                 .. SpellsMastery.GetAllSpells.Values,
+                .. DynamicSpellbookRegistry.GetAllSpells(),
             ];
 
         public static void SaveAllSpellsToJson(World world)

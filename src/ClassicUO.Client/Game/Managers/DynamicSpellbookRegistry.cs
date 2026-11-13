@@ -69,6 +69,16 @@ namespace ClassicUO.Game.Managers
             return 0;
         }
 
+        /// <summary>All spells of every server-defined book, e.g. for name lookups.</summary>
+        public static IEnumerable<SpellDefinition> GetAllSpells()
+        {
+            foreach (Dictionary<int, SpellDefinition> spells in _dynamicSpellDictionaries.Values)
+            {
+                foreach (SpellDefinition spell in spells.Values)
+                    yield return spell;
+            }
+        }
+
         public static List<SpellBookType> GetAllRegisteredTypes()
         {
             return new List<SpellBookType>(_dynamicSpellbooks);
